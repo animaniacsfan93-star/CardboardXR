@@ -11,13 +11,10 @@ name: iOS build
 # Unity's activation workflow, which makes the .alf file to upload, is unity-activation.yml here.
 # Also enable Actions: a fork starts with them off (Actions > I understand my workflows, go ahead).
 
+# Started by hand (Actions > iOS build > Run workflow), so nothing fails before the licence secrets
+# are in place. Add a `push:` trigger under `on:` once it has built once.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
 
 jobs:
   build:
