@@ -6,6 +6,8 @@ passthrough view, detected surfaces with anchored objects, and hand tracking fro
 camera with pinch, grab and a pointing ray.
 
 Tested on a **Pixel 9 Pro** (Android, ARCore) and an **iPhone 15 Pro** (iOS, ARKit, with LiDAR).
+Also targets the **iPhone 11 Pro Max**, which has no LiDAR: there hand tracking learns the hand's
+size from the colour camera alone, pinch and the hand's ray included.
 
 ## Video and viewer
 
@@ -76,6 +78,14 @@ and trusting the developer (Settings > General > VPN & Device Management). The p
 unlocked to launch; a build takes about five minutes, so if it auto-locks in the meantime, unlock
 it and run `ios_launch.sh`.
 
+### Without a Mac
+
+An iPhone app can only be built on macOS, so the iOS build above needs a Mac with Xcode. With a
+Linux PC instead, GitHub can do the building: the workflows in `.github/workflows/` export the Xcode
+project on a macOS runner and publish an unsigned `.ipa`, which you then sign for your own phone
+from Linux with a free Apple ID. [docs/ios-without-a-mac.md](docs/ios-without-a-mac.md) has the
+steps. Android builds don't need any of that: Unity's editor runs on Linux.
+
 ### Releases
 
 `Tools/release_android.sh 1.2.3` builds a release APK from a fresh clone of the public repository
@@ -109,6 +119,7 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
 | `renderScale N` | Eye texture resolution in percent (default 100) |
 | `msaa N` | Anti-aliasing samples: 1, 2, 4 or 8 (default 2) |
 | `handHz N` | Run the hand landmark model at most N times a second (default 0: every camera image) |
+| `handDepth 0` | Ignore a phone's depth sensor, for trying the colour-only hand tracking a phone without LiDAR uses |
 | `predictionMs N` | How far ahead head rotation is predicted, in ms (default 30) |
 | `tracker 1` | Head rotation from Android's game rotation vector instead of the app's own sensor fusion |
 | `nativeImu 0` | Android: read the sensors through the Input System instead of the native plugin |
@@ -121,8 +132,19 @@ phone's home screen. The app logs the options it received at startup (`[Stereo] 
 ## Using the app
 
 - **The screen's gear button**, top right, opens a small menu: *Set viewer* scans a viewer's QR
-  code; *Phone view* / *Viewer view* switches between the viewer's split-screen view and a single
-  full-screen phone view; *Open settings* opens the settings panel.
+  code; *Tune viewer* sets one up by hand in the headset (below); *Viewer profiles* lists the
+  viewers you've saved, to switch between or delete; *Phone view* / *Viewer view* switches between
+  the viewer's split-screen view and a single full-screen phone view; *Open settings* opens the
+  settings panel.
+- **Viewers you set up are kept as named profiles**, and the one you last chose starts the app. A
+  QR code's viewer is saved as one too. For a viewer with no code (a Shinecon, say), *Tune viewer*
+  puts a test pattern in front of your eyes, seen through its lenses, and a small panel under it:
+  look at its arrows to move to the next number, and at − or + to change the one shown, then tap (or
+  pinch, or press the viewer's button) to press what you're looking at. The numbers are the lens
+  separation, the screen-to-lens distance, the field of view, the two distortion coefficients, and
+  each eye's own offset across and up. The right ones make the pattern's grid straight and evenly
+  spaced, with the cross in the middle of each lens. *Save* keeps them under the profile's name,
+  *New* keeps them as a second viewer, and *Cancel* puts back the viewer you had.
 - **The app library**, above the settings panel, has an icon for the lobby and each demo: look at
   one to see what it is, and pinch or tap to open it, from anywhere, so you can go straight from one
   demo to another. *Apps* on the settings panel shows and hides it. The lobby is a checkerboard room
@@ -213,8 +235,9 @@ trim it. In passthrough both eyes see the same image, so one eye is the whole ex
     -projectPath . -runTests -testPlatform EditMode -testResults results.xml
 ```
 
-EditMode tests cover the parts that don't need a device: lens distortion and viewer QR profiles,
-sensor and pose fusion, the camera clock, hand geometry, pinch detection, depth sampling and palm
+EditMode tests cover the parts that don't need a device: lens distortion and per-eye viewer
+offsets, viewer profiles and the manual viewer tuning, sensor and pose fusion, the camera clock,
+hand geometry, pinch detection, the palm size learned without depth, depth sampling and palm
 calibration, floor picking, passthrough, gaze pointing and anchoring.
 
 ## How it's built
@@ -228,7 +251,9 @@ Code is in `Assets/_Project/Scripts`, one assembly per area:
 - **Stereo** — the stereo rig and lens distortion, head tracking (a gyroscope fusion corrected by
   AR poses), passthrough, surfaces, anchors, frame timing and the session log
 - **Hands** — hand tracking with MediaPipe's BlazeHand models on Unity Inference Engine, placed in
-  3D and fed to XR Hands and the XR Interaction Toolkit; on iOS, LiDAR depth teaches the hand's size
+  3D and fed to XR Hands and the XR Interaction Toolkit; on the Pro iPhones, LiDAR depth measures
+  the hand's size, and on any other phone the models' own shapes teach it, with a pinch that also
+  answers the fingers' gap in the image, which needs no scale
 - **Interaction** — gaze pointing and highlighting
 - **UI** — a Material Design for XR kit (Material 3's baseline dark scheme, Roboto, Material
   Icons) sized in Android XR's dp, which every scene's UI is built from

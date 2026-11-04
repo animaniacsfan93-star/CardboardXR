@@ -14,7 +14,8 @@ scaled down: that smooths it.
 
 The phone's screen size and the viewer's lens come from the app's session log, which records them
 at startup ("[Stereo] Cardboard v1: screen ..." and "[Stereo] Viewer lens: ..."); without a log,
---phone picks a known phone with the Cardboard v1 viewer.
+--phone picks a known phone with the Cardboard v1 viewer. A viewer set up by hand in the app logs
+its own numbers, eye offsets included, the same way.
 
   python3 Tools/record_eye.py clip.mov --log session.log
   python3 Tools/record_eye.py clip.mov --phone iphone -o clip-eye.mp4 --fov 70
@@ -35,7 +36,8 @@ import numpy as np
 
 # Cardboard v1, as ViewerParams.CardboardV1: what the app uses until a viewer's QR code is scanned.
 CARDBOARD_V1 = dict(screen_to_lens=0.042, inter_lens=0.06, tray_to_lens=0.035, alignment=0,
-                    fov=(40.0, 40.0, 40.0, 40.0), k=(0.441, 0.156))
+                    fov=(40.0, 40.0, 40.0, 40.0), k=(0.441, 0.156),
+                    offsets=(0.0, 0.0, 0.0, 0.0))
 # The test phones' screens in landscape, as the app measured them (meters, pixels).
 PHONES = {
     "iphone": dict(width_m=0.1411, height_m=0.0651, width_px=2556, height_px=1179),
@@ -57,12 +59,14 @@ def parse_log(path):
                 screen = dict(width_m=float(m.group(2)), height_m=float(m.group(3)),
                               width_px=int(m.group(4)), height_px=int(m.group(5)))
             m = re.search(r"\[Stereo\] Viewer lens: screenToLens ([\d.]+) interLens ([\d.]+) trayToLens ([\d.]+) "
-                          r"alignment (\d) fov ([\d.,]+) k ([-\d.,]*)", line)
+                          r"alignment (\d) fov ([\d.,]+) k ([-\d.,]*)(?: offsets ([-\d.,]+))?", line)
             if m:
                 viewer = dict(screen_to_lens=float(m.group(1)), inter_lens=float(m.group(2)),
                               tray_to_lens=float(m.group(3)), alignment=int(m.group(4)),
                               fov=tuple(float(v) for v in m.group(5).split(",")),
-                              k=tuple(float(v) for v in m.group(6).split(",") if v))
+                              k=tuple(float(v) for v in m.group(6).split(",") if v),
+                              offsets=tuple(float(v) for v in m.group(7).split(",")) if m.group(7)
+                              else (0.0, 0.0, 0.0, 0.0))
     if screen is None:
         sys.exit(f"No '[Stereo] ...: screen' line in {path}: is it the app's session log?")
     if viewer is None:
@@ -108,27 +112,44 @@ def y_eye_offset(viewer, screen):
     return screen["height_m"] / 2.0
 
 
-def field_of_view(viewer, screen):
-    """The left eye's (left, right, bottom, top) angles in radians, as LensDistortion works them out."""
+def eye_centre(viewer, screen, eye):
+    """The eye's optical centre, in meters from the screen's bottom left, with its own offset."""
+    if eye == "left":
+        x = (screen["width_m"] - viewer["inter_lens"]) / 2.0
+        offset = viewer["offsets"][0], viewer["offsets"][1]
+    else:
+        x = (screen["width_m"] + viewer["inter_lens"]) / 2.0
+        offset = viewer["offsets"][2], viewer["offsets"][3]
+    return x + offset[0], y_eye_offset(viewer, screen) + offset[1]
+
+
+def field_of_view(viewer, screen, eye):
+    """The eye's (left, right, bottom, top) angles in radians, as LensDistortion works them out."""
     k, to_lens = viewer["k"], viewer["screen_to_lens"]
-    outer = (screen["width_m"] - viewer["inter_lens"]) / 2.0
-    inner = viewer["inter_lens"] / 2.0
-    bottom = y_eye_offset(viewer, screen)
+    centre_x, centre_y = eye_centre(viewer, screen, eye)
+    half_width = screen["width_m"] / 2.0
+    if eye == "left":
+        outer, inner = centre_x, half_width - centre_x
+    else:
+        outer, inner = screen["width_m"] - centre_x, centre_x - half_width
+    bottom = centre_y
     top = screen["height_m"] - bottom
 
-    def angle(distance):
-        return math.atan(float(distort_radius(k, np.array(distance / to_lens))))
+    def angle(distance, vertical):
+        distance = max(0.0, distance) / to_lens
+        point = np.array([0.0, distance]) if vertical else np.array([distance, 0.0])
+        component = float(distort_radius(k, point)[1 if vertical else 0])
+        return math.atan(max(0.0, component))
 
     limits = [math.radians(a) for a in viewer["fov"]]
-    return (min(angle(outer), limits[0]), min(angle(inner), limits[1]),
-            min(angle(bottom), limits[2]), min(angle(top), limits[3]))
+    outer_limit, inner_limit = (limits[0], limits[1]) if eye == "left" else (limits[1], limits[0])
+    return (min(angle(outer, False), outer_limit), min(angle(inner, False), inner_limit),
+            min(angle(bottom, True), limits[2]), min(angle(top, True), limits[3]))
 
 
 def build_maps(viewer, screen, eye, out_w, out_h, h_fov_deg):
     """Where each pixel of the flat view comes from in the screen recording, in screen pixels."""
-    fov = field_of_view(viewer, screen)
-    if eye == "right":
-        fov = (fov[1], fov[0], fov[2], fov[3])
+    fov = field_of_view(viewer, screen, eye)
     # A view centered on the eye's axis, as wide as asked, within what the eye sees.
     half_w = min(math.tan(fov[0]), math.tan(fov[1]))
     half_h = min(math.tan(fov[2]), math.tan(fov[3]))
@@ -144,9 +165,9 @@ def build_maps(viewer, screen, eye, out_w, out_h, h_fov_deg):
     radius = np.hypot(tan_x, tan_y)
     scale = np.where(radius > 1e-9, distort_inverse_radius(viewer["k"], radius) / np.maximum(radius, 1e-9), 1.0)
     to_lens = viewer["screen_to_lens"]
-    center_x = (screen["width_m"] - viewer["inter_lens"]) / 2.0 if eye == "left" else (screen["width_m"] + viewer["inter_lens"]) / 2.0
-    screen_x = tan_x * scale * to_lens + center_x
-    screen_y = tan_y * scale * to_lens + y_eye_offset(viewer, screen)
+    centre_x, centre_y = eye_centre(viewer, screen, eye)
+    screen_x = tan_x * scale * to_lens + centre_x
+    screen_y = tan_y * scale * to_lens + centre_y
     px = screen_x / screen["width_m"] * screen["width_px"]
     py = (1.0 - screen_y / screen["height_m"]) * screen["height_px"]
     return px, py, math.degrees(2 * math.atan(half_w)), math.degrees(2 * math.atan(half_h))

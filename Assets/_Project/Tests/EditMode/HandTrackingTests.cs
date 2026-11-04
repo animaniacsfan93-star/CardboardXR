@@ -219,6 +219,11 @@ namespace CardboardXR.Stereo.Tests
             pinch.Update(0.01f);
             pinch.Reset();
             Assert.IsFalse(pinch.IsPinched);
+
+            // A pinch the image's gap starts, without a 3D distance to go by.
+            pinch.Begin();
+            Assert.IsTrue(pinch.IsPinched);
+            Assert.IsFalse(pinch.Update(0.05f), "and it ends by the open threshold");
         }
 
         [Test]

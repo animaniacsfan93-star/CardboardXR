@@ -28,6 +28,9 @@ namespace CardboardXR.Hands
         public long TimestampNs { get; private set; }
         public bool HasConfidence { get; private set; }
 
+        // Whether a depth image has arrived at all.
+        public bool HasDepth => TimestampNs != 0;
+
         // Why the latest TryTake failed, for the log.
         public int NoImage { get; private set; }
         public int Unmatched { get; private set; }

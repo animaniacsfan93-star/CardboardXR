@@ -1,0 +1,74 @@
+name: iOS build
+
+# Builds the iPhone app on GitHub's macOS runner, where Xcode is: Unity exports the Xcode project
+# (Builds/iOS) on the runner, and xcodebuild makes an unsigned .ipa to download. Signing it for your
+# own iPhone happens on your own computer afterwards; docs/ios-without-a-mac.md walks through it.
+#
+# Needs, once, in Settings > Secrets and variables > Actions:
+#   UNITY_LICENSE   the whole text of the .ulf file from Unity's manual licence activation
+#   UNITY_EMAIL     the Unity account's email
+#   UNITY_PASSWORD  the Unity account's password
+# Unity's activation workflow, which makes the .alf file to upload, is unity-activation.yml here.
+# Also enable Actions: a fork starts with them off (Actions > I understand my workflows, go ahead).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+
+jobs:
+  build:
+    name: Unity export, then Xcode
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      CARDBOARDXR_BUILD_PATH: build/iOS
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The hand models are several megabytes; keep them as they are.
+          lfs: true
+
+      - uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-iOS-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          restore-keys: Library-iOS-
+
+      # Installs this Unity version with its iOS module, activates the licence, and runs
+      # StereoBuilder.BuildIosForCi, which writes the Xcode project to CARDBOARDXR_BUILD_PATH.
+      - uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: iOS
+          unityVersion: 6000.6.0f1
+          buildMethod: ProjectBootstrap.StereoBuilder.BuildIosForCi
+          versioning: None
+          allowDirtyBuild: true
+
+      - name: Xcode builds an unsigned app
+        run: |
+          set -euo pipefail
+          cd "$CARDBOARDXR_BUILD_PATH"
+          xcodebuild -project Unity-iPhone.xcodeproj -scheme Unity-iPhone \
+            -configuration Release -sdk iphoneos -derivedDataPath xcode-out \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+          APP=$(ls -d xcode-out/Build/Products/Release-iphoneos/*.app | head -1)
+          echo "Built $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry CardboardXR-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CardboardXR-unsigned-ipa
+          path: build/iOS/CardboardXR-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

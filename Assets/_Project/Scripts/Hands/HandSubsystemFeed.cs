@@ -40,6 +40,10 @@ namespace CardboardXR.Hands
                  "whatever the hand's 3D shape says. The pinch study measured about 0.23 pinched and " +
                  "1.8 to 2.1 open.")]
         [SerializeField] float m_OpenRatio = 1f;
+        [Tooltip("On a phone whose palm size no depth sensor has taught, a pinch also starts when the " +
+                 "fingertips' gap in the image, over the palm's width there, closes below this: that " +
+                 "gap needs no scale, where the 3D one carries the palm size's error.")]
+        [SerializeField] float m_CloseRatio = PinchSensor.k_CloseRatio;
 
         // Frames where the image gap read open while the fitting 3D shape held the pinch, for the
         // status line.
@@ -62,6 +66,9 @@ namespace CardboardXR.Hands
         const float k_EdgeMargin = 0.03f;
         int m_OpenResults;
         int m_PinchResult = -1;
+        // Whether the pinch under way was started by the image's gap rather than the 3D one, and so
+        // ends by it too.
+        bool m_ByRatio;
         bool m_LoggedEdge;
         // Whether a pinch was held back during this turn, to log it once.
         bool m_LoggedTurn;
@@ -139,6 +146,7 @@ namespace CardboardXR.Hands
             if (CardboardHandProvider.Feed == this)
                 CardboardHandProvider.Feed = null;
             m_HasHand = false;
+            m_ByRatio = false;
         }
 
         void OnDestroy()
@@ -161,7 +169,10 @@ namespace CardboardXR.Hands
                 if (m_LostSince < 0f)
                     m_LostSince = Time.unscaledTime;
                 if (Time.unscaledTime - m_LostSince > k_PinchKeptSeconds)
+                {
                     m_Pinch.Reset();
+                    m_ByRatio = false;
+                }
                 m_Turn.Reset();
                 return;
             }
@@ -202,16 +213,28 @@ namespace CardboardXR.Hands
                 m_OpenResults = 0;
                 if (!m_Tracker.ShapeFits)
                     return;
-                var wouldClose = m_Tracker.PinchDistance < m_PinchDistance;
-                if (wouldClose && m_Turn.IsTurning)
+                var byGap = m_Tracker.PinchDistance < m_PinchDistance;
+                // No depth sensor taught the palm size, so the 3D gap carries its error: the image's
+                // gap over the palm's width there needs no scale at all, and a pinch that a
+                // mis-scaled palm reads wide still counts.
+                var byRatio = !m_Tracker.SizeFromDepth && m_Tracker.PinchRatio < m_CloseRatio;
+                if ((byGap || byRatio) && m_Turn.IsTurning)
                 {
                     if (!m_LoggedTurn)
                         Debug.Log($"[Hands] Fingertips {m_Tracker.PinchDistance * 100f:F1} cm apart while the hand turned over; not a pinch");
                     m_LoggedTurn = true;
                 }
-                else
+                else if (byGap)
                 {
+                    m_ByRatio = false;
                     m_Pinch.Update(m_Tracker.PinchDistance);
+                }
+                else if (byRatio)
+                {
+                    m_ByRatio = true;
+                    m_Pinch.Begin();
+                    Debug.Log($"[Hands] Pinched by the image's gap ({m_Tracker.PinchRatio:F2} palm widths) " +
+                              $"while the 3D gap read {m_Tracker.PinchDistance * 100f:F1} cm; the palm size isn't measured");
                 }
                 if (!m_Turn.IsTurning)
                     m_LoggedTurn = false;
@@ -219,8 +242,13 @@ namespace CardboardXR.Hands
             }
 
             // Pinched: whether this result says the fingers have opened, by the 3D shape while it fits,
-            // by the image's gap once it has collapsed.
-            var opens = m_Tracker.ShapeFits ? m_Tracker.PinchDistance > m_ReleaseDistance : m_Tracker.PinchRatio > m_OpenRatio;
+            // by the image's gap once it has collapsed -- or, for a pinch the image's gap started, by
+            // the image throughout: the 3D gap is exactly what's mis-scaled then.
+            var opens = m_ByRatio
+                ? m_Tracker.PinchRatio > m_OpenRatio
+                : m_Tracker.ShapeFits
+                    ? m_Tracker.PinchDistance > m_ReleaseDistance
+                    : m_Tracker.PinchRatio > m_OpenRatio;
             if (m_Tracker.ShapeFits && !opens && m_Tracker.PinchRatio > m_OpenRatio)
                 m_IgnoredOpens++;
             if (!opens)
@@ -250,6 +278,7 @@ namespace CardboardXR.Hands
                 Debug.Log($"[Hands] Fingers opened to {m_Tracker.PinchRatio:F2} of the palm's width; ending the pinch, " +
                           "whose 3D shape had collapsed");
             m_Pinch.Reset();
+            m_ByRatio = false;
             m_OpenResults = 0;
         }
 

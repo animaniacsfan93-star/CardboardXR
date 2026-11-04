@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace CardboardXR.Stereo
@@ -13,12 +14,19 @@ namespace CardboardXR.Stereo
     // Ported from the Cardboard SDK (sdk/lens_distortion.cc and sdk/distortion_mesh.cc, Apache
     // License 2.0). Screen UVs follow the SDK: 0-1 across the whole landscape screen, origin at the
     // bottom left, left eye on the left half.
+    // Each eye's optical centre is where the lens separation puts it, moved by that eye's own offset
+    // (ViewerParams.perEyeOffset): a viewer's lenses aren't always exactly a lens separation apart, or
+    // level with the phone. Each eye's view reaches from its own centre out to its half of the screen
+    // -- the left eye's from the screen's left edge to its middle, the right eye's from the middle to
+    // its right edge -- and no farther than the viewer's own field of view.
     public class LensDistortion
     {
         public const int MeshResolution = 40;
 
         // Assumed bezel between the tray and the screen's lit area.
         const float k_DefaultBorderSizeMeters = 0.003f;
+        // A viewer's own view of its lens when it doesn't say: Cardboard v1's.
+        static readonly float[] k_DefaultDeviceFov = { 40f, 40f, 40f, 40f };
 
         struct Viewport
         {
@@ -32,19 +40,23 @@ namespace CardboardXR.Stereo
         readonly PolynomialRadialDistortion m_Distortion;
         readonly float m_ScreenWidthMeters;
         readonly float m_ScreenHeightMeters;
+        // The viewer's own limits on each eye's view in degrees, (left, right, bottom, top) for the
+        // left eye, as the viewer reports them.
+        readonly float[] m_DeviceFov;
         // Radians as (left, right, bottom, top), indexed by Eye.
         readonly Vector4[] m_FieldOfView = new Vector4[2];
 
         public LensDistortion(ViewerParams viewer, float screenWidthMeters, float screenHeightMeters)
         {
             m_Viewer = viewer;
-            m_Distortion = new PolynomialRadialDistortion(viewer.distortionCoefficients);
+            m_Distortion = new PolynomialRadialDistortion(viewer.distortionCoefficients ?? Array.Empty<float>());
             m_ScreenWidthMeters = screenWidthMeters;
             m_ScreenHeightMeters = screenHeightMeters;
+            var angles = viewer.leftEyeFieldOfViewAngles;
+            m_DeviceFov = angles != null && angles.Length == 4 ? angles : k_DefaultDeviceFov;
 
-            var left = CalculateFieldOfView();
-            m_FieldOfView[(int)Eye.Left] = left;
-            m_FieldOfView[(int)Eye.Right] = new Vector4(left.y, left.x, left.z, left.w);
+            for (var i = 0; i < 2; i++)
+                m_FieldOfView[i] = CalculateFieldOfView((Eye)i);
         }
 
         public ViewerParams Viewer => m_Viewer;
@@ -54,9 +66,13 @@ namespace CardboardXR.Stereo
         // (left, right, bottom, top).
         public Vector4 GetFieldOfView(Eye eye) => m_FieldOfView[(int)eye];
 
-        // Eye position in head space, in meters: half the lens separation to either side.
-        public Vector3 GetEyeOffset(Eye eye) =>
-            new((eye == Eye.Left ? -0.5f : 0.5f) * m_Viewer.interLensDistance, 0f, 0f);
+        // Eye position in head space, in meters: its lens's optical centre on the screen, from the
+        // screen's middle across and the lenses' nominal height up.
+        public Vector3 GetEyeOffset(Eye eye)
+        {
+            var centre = EyeCentre(eye);
+            return new Vector3(centre.x - m_ScreenWidthMeters / 2f, centre.y - GetYEyeOffsetMeters(), 0f);
+        }
 
         public Matrix4x4 GetProjectionMatrix(Eye eye, float near, float far)
         {
@@ -138,28 +154,46 @@ namespace CardboardXR.Stereo
             return mesh;
         }
 
-        Vector4 CalculateFieldOfView()
+        // This eye's optical centre on the screen, in meters from its bottom left corner.
+        Vector2 EyeCentre(Eye eye) =>
+            new((eye == Eye.Left
+                    ? (m_ScreenWidthMeters - m_Viewer.interLensDistance) / 2f
+                    : (m_ScreenWidthMeters + m_Viewer.interLensDistance) / 2f) + m_Viewer.EyeOffsetX(eye),
+                GetYEyeOffsetMeters() + m_Viewer.EyeOffsetY(eye));
+
+        Vector4 CalculateFieldOfView(Eye eye)
         {
-            var deviceFov = m_Viewer.leftEyeFieldOfViewAngles;
+            var centre = EyeCentre(eye);
             var toLens = m_Viewer.screenToLensDistance;
-            var outerDistance = (m_ScreenWidthMeters - m_Viewer.interLensDistance) / 2f;
-            var innerDistance = m_Viewer.interLensDistance / 2f;
-            var bottomDistance = GetYEyeOffsetMeters();
-            var topDistance = m_ScreenHeightMeters - bottomDistance;
+            var halfWidth = m_ScreenWidthMeters / 2f;
+            // Out to the eye's own edge of the screen, and in to its middle, where the other eye's
+            // half begins. The inner edge is on the left of the right eye's view and on the right of
+            // the left eye's, so which distance is the view's left angle differs by eye.
+            var outerDistance = eye == Eye.Left ? centre.x : m_ScreenWidthMeters - centre.x;
+            var innerDistance = eye == Eye.Left ? halfWidth - centre.x : centre.x - halfWidth;
+            var leftDistance = eye == Eye.Left ? outerDistance : innerDistance;
+            var rightDistance = eye == Eye.Left ? innerDistance : outerDistance;
+            var bottomDistance = centre.y;
+            var topDistance = m_ScreenHeightMeters - centre.y;
 
-            // The lens widens what the screen shows, so the visible angle to each screen edge is
-            // the distorted tan-angle; the viewer's own limits clamp it.
-            var outerAngle = Mathf.Atan(m_Distortion.Distort(new Vector2(outerDistance / toLens, 0f)).x);
-            var innerAngle = Mathf.Atan(m_Distortion.Distort(new Vector2(innerDistance / toLens, 0f)).x);
-            var bottomAngle = Mathf.Atan(m_Distortion.Distort(new Vector2(0f, bottomDistance / toLens)).y);
-            var topAngle = Mathf.Atan(m_Distortion.Distort(new Vector2(0f, topDistance / toLens)).y);
-
+            // The viewer's own limits, which count the same way: its left angle is the outer one for
+            // the left eye, and the inner one for the right.
+            var leftLimit = m_DeviceFov[eye == Eye.Left ? 0 : 1] * Mathf.Deg2Rad;
+            var rightLimit = m_DeviceFov[eye == Eye.Left ? 1 : 0] * Mathf.Deg2Rad;
             return new Vector4(
-                Mathf.Min(outerAngle, deviceFov[0] * Mathf.Deg2Rad),
-                Mathf.Min(innerAngle, deviceFov[1] * Mathf.Deg2Rad),
-                Mathf.Min(bottomAngle, deviceFov[2] * Mathf.Deg2Rad),
-                Mathf.Min(topAngle, deviceFov[3] * Mathf.Deg2Rad));
+                Mathf.Min(AcrossAngle(leftDistance, toLens), leftLimit),
+                Mathf.Min(AcrossAngle(rightDistance, toLens), rightLimit),
+                Mathf.Min(UpAngle(bottomDistance, toLens), m_DeviceFov[2] * Mathf.Deg2Rad),
+                Mathf.Min(UpAngle(topDistance, toLens), m_DeviceFov[3] * Mathf.Deg2Rad));
         }
+
+        // The lens widens what the screen shows, so the visible angle to a screen edge is the
+        // distorted tan-angle. A lens pushed past the edge sees none of that direction.
+        float AcrossAngle(float distance, float toLens) =>
+            Mathf.Atan(Mathf.Max(0f, m_Distortion.Distort(new Vector2(Mathf.Max(0f, distance) / toLens, 0f)).x));
+
+        float UpAngle(float distance, float toLens) =>
+            Mathf.Atan(Mathf.Max(0f, m_Distortion.Distort(new Vector2(0f, Mathf.Max(0f, distance) / toLens)).y));
 
         // Height of the lenses' optical center above the bottom of the screen.
         float GetYEyeOffsetMeters()
@@ -179,15 +213,13 @@ namespace CardboardXR.Stereo
         void CalculateViewports(Eye eye, out Viewport screen, out Viewport texture)
         {
             var toLens = m_Viewer.screenToLensDistance;
-            var eyeCenterMeters = eye == Eye.Left
-                ? (m_ScreenWidthMeters - m_Viewer.interLensDistance) / 2f
-                : (m_ScreenWidthMeters + m_Viewer.interLensDistance) / 2f;
+            var centre = EyeCentre(eye);
             screen = new Viewport
             {
                 width = m_ScreenWidthMeters / toLens,
                 height = m_ScreenHeightMeters / toLens,
-                xEyeOffset = eyeCenterMeters / toLens,
-                yEyeOffset = GetYEyeOffsetMeters() / toLens,
+                xEyeOffset = centre.x / toLens,
+                yEyeOffset = centre.y / toLens,
             };
 
             var fov = m_FieldOfView[(int)eye];

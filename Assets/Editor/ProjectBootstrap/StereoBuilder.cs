@@ -72,11 +72,34 @@ namespace ProjectBootstrap
             BuildAndExit(BuildScenes(), XcodeProject, BuildTarget.iOS);
         }
 
+        // The same export as BuildIos, for a CI runner (see .github/workflows/ios-build.yml): it
+        // returns instead of quitting, so the job can go on to Xcode with the project it made, and it
+        // throws when the export failed so the run fails with Unity's own errors. CARDBOARDXR_BUILD_PATH
+        // puts the project where the CI runner expects it, by default Builds/iOS.
+        // Invoke with: -buildTarget iOS -executeMethod ProjectBootstrap.StereoBuilder.BuildIosForCi
+        public static void BuildIosForCi()
+        {
+            var output = System.Environment.GetEnvironmentVariable("CARDBOARDXR_BUILD_PATH");
+            if (string.IsNullOrWhiteSpace(output))
+                output = XcodeProject;
+            var result = BuildProject(BuildScenes(), output.Trim(), BuildTarget.iOS);
+            if (result != BuildResult.Succeeded)
+                throw new BuildFailedException($"[Build] The iOS export {result}; see the log above");
+            Debug.Log($"[Build] Xcode project ready at {output.Trim()}");
+        }
+
         // A release build unless CARDBOARDXR_DEVELOPMENT=1: a development build is debuggable on
         // Android and lets the Unity Profiler connect over the local network. CARDBOARDXR_BUNDLE_ID
         // builds under another app id, since an iOS bundle id belongs to the Apple team that first
-        // signed it. The first scene is the one the app starts in.
+        // signed it. The scene list's first entry is the scene the app starts in.
         static void BuildAndExit(string[] scenePaths, string outputPath, BuildTarget target)
+        {
+            EditorApplication.Exit(BuildProject(scenePaths, outputPath, target) == BuildResult.Succeeded ? 0 : 1);
+        }
+
+        // The build itself, without ending the editor: a CI runner goes on to Xcode with the project it
+        // made, and needs the result rather than an exit code.
+        static BuildResult BuildProject(string[] scenePaths, string outputPath, BuildTarget target)
         {
             var bundleId = System.Environment.GetEnvironmentVariable("CARDBOARDXR_BUNDLE_ID");
             if (!string.IsNullOrWhiteSpace(bundleId))
@@ -89,10 +112,7 @@ namespace ProjectBootstrap
             var version = PlayerSettings.bundleVersion;
             var versionCode = PlayerSettings.Android.bundleVersionCode;
             if (!ApplyRelease(target))
-            {
-                EditorApplication.Exit(1);
-                return;
-            }
+                return BuildResult.Failed;
             var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
             {
                 scenes = scenePaths,
@@ -110,7 +130,7 @@ namespace ProjectBootstrap
             var summary = report.summary;
             Debug.Log($"[Build] {(development ? "Development build" : "Build")} {summary.result}: {outputPath} " +
                       $"({summary.totalSize / 1e6:F1} MB, {summary.totalTime}, {summary.totalErrors} errors)");
-            EditorApplication.Exit(summary.result == BuildResult.Succeeded ? 0 : 1);
+            return summary.result;
         }
 
         // For published builds (Tools/release_android.sh). CARDBOARDXR_VERSION (1.2.3) sets the version
@@ -206,7 +226,7 @@ namespace ProjectBootstrap
             var tracker = head.AddComponent<GyroHeadTracker>();
             head.AddComponent<FrameTimingLog>();
             head.AddComponent<PerformanceLog>();
-            var (poseSource, origin, arCamera, arViewOnly) = BuildViewerSetup(rig);
+            var (poseSource, origin, arCamera, arViewOnly) = BuildViewerSetup(rig, unlit);
             var fusion = head.AddComponent<HeadPoseFusion>();
             var passthrough = origin.AddComponent<PassthroughController>();
             var demosObject = new GameObject("Demos");
@@ -246,7 +266,8 @@ namespace ProjectBootstrap
         // An AR session and camera, off in the scene: ArPoseSource runs them for 6DoF tracking, and
         // ViewerSetupController for QR scanning. Images are read on the CPU, so the AR camera itself
         // never renders.
-        static (ArPoseSource poseSource, GameObject origin, Camera arCamera, Behaviour[] arViewOnly) BuildViewerSetup(StereoRig rig)
+        static (ArPoseSource poseSource, GameObject origin, Camera arCamera, Behaviour[] arViewOnly) BuildViewerSetup(
+            StereoRig rig, Shader unlit)
         {
             var sessionObject = new GameObject("AR Session");
             var session = sessionObject.AddComponent<ARSession>();
@@ -314,6 +335,15 @@ namespace ProjectBootstrap
             serializedSetup.FindProperty("m_Session").objectReferenceValue = session;
             serializedSetup.FindProperty("m_CameraManager").objectReferenceValue = cameraManager;
             serializedSetup.FindProperty("m_Scanner").objectReferenceValue = scanner;
+            // Setting a viewer up by hand: the test pattern and its panel are built at runtime, and
+            // the panel's buttons take the gaze through a GazeCanvas, which the controller adds.
+            var tuning = setup.gameObject.AddComponent<ViewerTuningController>();
+            var serializedTuning = new SerializedObject(tuning);
+            serializedTuning.FindProperty("m_Rig").objectReferenceValue = rig;
+            serializedTuning.FindProperty("m_PatternMaterial").objectReferenceValue =
+                CreateMaterial("Viewer Test Pattern", unlit, Color.white, null);
+            serializedTuning.ApplyModifiedPropertiesWithoutUndo();
+            serializedSetup.FindProperty("m_Tuning").objectReferenceValue = tuning;
             serializedSetup.ApplyModifiedPropertiesWithoutUndo();
             return (poseSource, origin.gameObject, arCamera, new Behaviour[] { background, poseDriver });
         }

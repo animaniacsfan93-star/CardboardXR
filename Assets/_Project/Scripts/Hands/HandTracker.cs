@@ -28,6 +28,10 @@ namespace CardboardXR.Hands
     // second tracking felt laggy. Tracking pauses while RoomBoundary scans for surfaces, which
     // leaves the CPU to ARCore's plane finding; the hand isn't needed then. Logs [Hands]. The
     // "handAxes" launch option (1 to 8) overrides how the camera image's axes lie on the screen.
+    // A depth sensor, where the phone has one (a Pro iPhone's LiDAR), measures the palm and teaches
+    // the hand's size. Where it hasn't (an iPhone 11 Pro Max, or any Android), environment depth isn't
+    // asked for at all: the size is learned from the hand model's own shapes instead (PalmSizeLearner),
+    // and the pinch has a scale-free witness in the image (HandSubsystemFeed).
     [DefaultExecutionOrder(-120)]
     public class HandTracker : MonoBehaviour
     {
@@ -50,18 +54,18 @@ namespace CardboardXR.Hands
         const float k_MinHandDistance = 0.05f;
         // Consecutive results whose distances differ by more than this ratio are logged.
         const float k_JumpRatio = 1.3f;
-        // The palm's size in 3D (see HandGeometry.PalmSize) for a typical adult hand, in meters, and
-        // the range the user's can be learned within.
-        const float k_TypicalPalmSize = 0.055f;
-        const float k_MinPalmSize = 0.04f;
-        const float k_MaxPalmSize = 0.075f;
-        // How much of each well-fitting shape's palm size goes into the learned size.
+        // How much of a depth measurement the palm size (see PalmSizeLearner) takes at a time, while a
+        // depth sensor is teaching it.
         const float k_PalmSizeRate = 0.02f;
         // Measured depth teaches the palm size only from this far out, in meters. Against a ruler,
         // the iPhone 15 Pro's LiDAR read 30 cm at 30 cm but 16.7 cm at 15 cm.
         const float k_MinCalibrationDepth = 0.25f;
         // And only within arm's reach: the first test's first "hand" was 1.1 m away, a false detection.
         const float k_MaxCalibrationDepth = 0.7f;
+        // Camera images after asking for environment depth, without a depth image, before it's taken
+        // that nothing provides one. ARKit may take a moment to decide, and a phone without a depth
+        // sensor never answers.
+        const int k_DepthProbeImages = 40;
         // A hand the palm detector first finds farther than this from the camera, in meters, isn't
         // taken: in testing it kept finding "hands" 0.9 to 1.7 m away. Only when
         // first found, though. Distance alone can't tell them from the real hand, which at full
@@ -121,6 +125,10 @@ namespace CardboardXR.Hands
 
         // The 21 joints' world positions, in MediaPipe's order, while IsTracking.
         public Vector3[] Joints { get; } = new Vector3[HandGeometry.JointCount];
+
+        // Whether the palm size was taught by measured depth, rather than learned from the hand
+        // model's own shapes (see PalmSizeLearner).
+        public bool SizeFromDepth => m_PalmFromDepth;
 
         // The palm's distance ahead of the camera, in meters, while IsTracking.
         public float HandDistance { get; private set; }
@@ -219,7 +227,10 @@ namespace CardboardXR.Hands
         readonly Vector2[] m_ImageLandmarks = new Vector2[HandGeometry.JointCount];
         readonly Vector3[] m_MetricLandmarks = new Vector3[HandGeometry.JointCount];
         // The user's palm size in 3D, in meters, learned from shapes that fit well.
-        float m_PalmSize = k_TypicalPalmSize;
+        float m_PalmSize = PalmSizeLearner.Typical;
+        // The same, when no depth sensor measures it: a median over the model's own recent shapes,
+        // so one bad shape doesn't move it.
+        readonly PalmSizeLearner m_SizeLearner = new();
         readonly OneEuroFilter[] m_JointFilters = CreateJointFilters();
         // The latest result's smoothed joints, their image's time, and the hand's smoothed speed.
         readonly Vector3[] m_ResultJoints = new Vector3[HandGeometry.JointCount];
@@ -238,6 +249,9 @@ namespace CardboardXR.Hands
         readonly DepthSampler m_DepthSampler = new();
         bool m_UseDepth;
         bool m_LoggedDepth;
+        // Camera images since asking for depth without getting any, to tell no sensor from a slow
+        // start (k_DepthProbeImages).
+        int m_DepthMisses;
         // Measured over estimated palm depth, split at 20 cm, inside which the LiDAR reads long.
         readonly List<float> m_NearDepthRatios = new();
         readonly List<float> m_FarDepthRatios = new();
@@ -307,17 +321,65 @@ namespace CardboardXR.Hands
             if (handHz > 0)
                 m_TrackInterval = 1f / handHz;
             m_CameraManager.frameReceived += OnCameraFrame;
-            // Only on iOS for now, where environment depth comes from the Pro models' LiDAR. ARCore
-            // offers it through the same API, but a Pixel 9 Pro has no depth sensor, so its depth is
-            // inferred from motion, which assumes a still scene and can't follow a moving hand, and
-            // costs heat the hand models already strain.
-            m_UseDepth = m_Occlusion != null && Application.platform == RuntimePlatform.IPhonePlayer;
+            // Environment depth measures the palm where the camera sees it, but only a depth sensor
+            // gives it: the Pro iPhones' LiDAR. Asking on a phone without one fails every image and
+            // costs heat, so the palm size is learned from the camera's own shapes there instead (see
+            // PalmSizeLearner). ARCore offers the same API, but its depth is inferred from motion,
+            // which assumes a still scene and can't follow a moving hand.
+            m_UseDepth = DepthAvailable(m_Occlusion, out var noDepth);
+            // "handDepth 0" does the same on a phone with a sensor, to try the colour-only path on it.
+            if (m_UseDepth && LaunchOptions.GetInt("handDepth", 1) == 0)
+            {
+                m_UseDepth = false;
+                noDepth = "turned off by \"handDepth 0\"";
+            }
             if (m_UseDepth)
                 m_Occlusion.enabled = true;
+            Debug.Log(m_UseDepth
+                ? "[Hands] Environment depth is on: the palm size is measured where the camera sees it"
+                : $"[Hands] No depth sensor ({noDepth}): the palm size is learned from the camera's own shapes");
             m_StatusStart = Time.unscaledTime;
             m_Running = true;
             if (!m_LoopActive)
                 RunLoop();
+        }
+
+        // Whether the AR provider can measure the hand's depth, and why not if it can't. Support can
+        // take a moment to be decided, so an unknown is taken as yes: the first images without a
+        // depth image then turn it off (StopDepth).
+        static bool DepthAvailable(AROcclusionManager occlusion, out string reason)
+        {
+            if (occlusion == null)
+            {
+                reason = "no occlusion manager";
+                return false;
+            }
+            if (Application.platform != RuntimePlatform.IPhonePlayer)
+            {
+                reason = "only the Pro iPhones have one";
+                return false;
+            }
+            var descriptor = occlusion.descriptor;
+            if (descriptor != null && descriptor.environmentDepthImageSupported == Supported.Unsupported)
+            {
+                reason = "this iPhone has none";
+                return false;
+            }
+            reason = null;
+            return true;
+        }
+
+        // Nothing provides depth after all: the palm size goes back to the camera's own shapes, and
+        // the occlusion manager, which was asking for it every frame, is let go of.
+        void StopDepth(string reason)
+        {
+            if (!m_UseDepth)
+                return;
+            m_UseDepth = false;
+            if (m_Occlusion != null)
+                m_Occlusion.enabled = false;
+            Debug.Log($"[Hands] Turning environment depth off: {reason}. The palm size is learned from " +
+                      "the camera's own shapes instead");
         }
 
         void OnDisable()
@@ -444,13 +506,13 @@ namespace CardboardXR.Hands
                 return;
             var target = HandGeometry.PalmSizeForDepth(m_PalmSize, estimate, joints);
             // A measurement implying a palm no adult has was of something else.
-            if (target < k_MinPalmSize || target > k_MaxPalmSize)
+            if (target < PalmSizeLearner.Min || target > PalmSizeLearner.Max)
             {
                 m_ImplausibleDepths++;
                 return;
             }
             var learned = Mathf.Exp(Mathf.Lerp(Mathf.Log(m_PalmSize), Mathf.Log(target), k_PalmSizeRate));
-            m_PalmSize = Mathf.Clamp(learned, k_MinPalmSize, k_MaxPalmSize);
+            m_PalmSize = Mathf.Clamp(learned, PalmSizeLearner.Min, PalmSizeLearner.Max);
             m_DepthCalibrations++;
             if (m_PalmFromDepth)
                 return;
@@ -502,7 +564,7 @@ namespace CardboardXR.Hands
         string DepthSummary()
         {
             if (!m_UseDepth)
-                return "";
+                return $"; no depth sensor: the palm size came from {m_SizeLearner.Count} shapes the camera fitted";
             return $"; measured joint depth over estimate: under 20 cm {RatioSummary(m_NearDepthRatios)}, " +
                    $"20 cm and over {RatioSummary(m_FarDepthRatios)}; palm size taught by {m_DepthCalibrations} " +
                    $"measurements ({m_ImplausibleDepths} implying no real palm left out); {m_DepthNoPixels} palms " +
@@ -721,8 +783,10 @@ namespace CardboardXR.Hands
                 // to be measured would otherwise be stuck at the typical size.
                 if (fitError < k_GoodFitError && !m_PalmFromDepth)
                 {
-                    var learned = Mathf.Exp(Mathf.Lerp(Mathf.Log(m_PalmSize), Mathf.Log(palmSize), k_PalmSizeRate));
-                    m_PalmSize = Mathf.Clamp(learned, k_MinPalmSize, k_MaxPalmSize);
+                    // No measured depth to teach the palm size, so the model's own shape does: a median
+                    // over the recent ones, so a single collapsed or edge-on shape doesn't move it.
+                    m_SizeLearner.AddShape(palmSize);
+                    m_PalmSize = m_SizeLearner.Size;
                 }
                 PinchDistance = Vector3.Distance(m_MetricLandmarks[HandGeometry.ThumbTip], m_MetricLandmarks[HandGeometry.IndexTip]);
                 m_ClosestPinch = Mathf.Min(m_ClosestPinch, PinchDistance);
@@ -828,7 +892,14 @@ namespace CardboardXR.Hands
                     return false;
                 m_LastImageNs = timestampNs;
                 if (m_UseDepth)
+                {
                     TakeDepth(timestampNs);
+                    // ARKit can take a moment to say whether it has depth, and a phone can say it has
+                    // when it hasn't. No depth image after this many is no sensor: the palm size goes
+                    // back to the camera's shapes, rather than being asked for on every image.
+                    if (!m_DepthSampler.HasDepth && ++m_DepthMisses >= k_DepthProbeImages)
+                        StopDepth($"{m_DepthMisses} camera images came with no depth");
+                }
 
                 var divisor = Mathf.Max(1, Mathf.CeilToInt(image.width / (float)m_MaxImageWidth));
                 var size = new Vector2Int(image.width / divisor, image.height / divisor);
@@ -1001,7 +1072,10 @@ namespace CardboardXR.Hands
                           $"{m_LandmarkMs / landmarkerRuns:F0} ms including waits; presence {m_PresenceSum / landmarkerRuns:F2}, " +
                           $"handedness {m_Handedness:F2}; fit error {m_FitErrorSum / Mathf.Max(1, m_Fits):F1} px, {m_RejectedFits} " +
                           $"collapsed shapes replaced, {m_BadFits} bad fits, {m_OutOfReach} new hands beyond reach ignored, " +
-                          $"palm {m_PalmSize * 100f:F1} cm, " +
+                          $"palm {m_PalmSize * 100f:F1} cm " +
+                          (m_PalmFromDepth ? "(measured)" : m_UseDepth
+                              ? $"(from {m_SizeLearner.Count} shapes, until depth teaches it)"
+                              : $"(from {m_SizeLearner.Count} shapes)") + ", " +
                           $"{m_InterpolatedPoses} poses interpolated, fingertips " +
                           (float.IsPositiveInfinity(m_ClosestPinch) ? "not seen" : $"{m_ClosestPinch * 100f:F1}-{m_WidestPinch * 100f:F1} cm apart") +
                           $"; results {m_ResultAgeSum * 1000 / Math.Max(1, m_ResultAges):F0} ms behind the camera image, " +

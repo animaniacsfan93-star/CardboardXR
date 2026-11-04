@@ -1,0 +1,42 @@
+name: Unity activation
+
+# Makes the licence file iOS build needs, without a Unity editor of your own. Run this once, then:
+#   1. Download the Unity_v6000.x.alf artifact.
+#   2. Upload it at https://license.unity3d.com/manual, signed in to a (free) Unity account, and
+#      choose Unity Personal / "I don't use Unity in a professional capacity".
+#   3. Download the .ulf file it gives you and paste its whole text into the repository secret
+#      UNITY_LICENSE (Settings > Secrets and variables > Actions). Add UNITY_EMAIL and
+#      UNITY_PASSWORD too, the account's own.
+#   4. Run the "iOS build" workflow.
+# A licence like this is personal to the account that made it: keep the secret private.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  activation:
+    name: Make the .alf file
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Runs Unity headless on Linux just to write the activation request file.
+      - uses: game-ci/unity-builder@v4
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        continue-on-error: true
+        with:
+          targetPlatform: StandaloneLinux64
+          unityVersion: 6000.6.0f1
+          allowDirtyBuild: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unity-license-request
+          path: |
+            **/*.alf
+            Unity_v*.alf
+          if-no-files-found: warn
+          retention-days: 7

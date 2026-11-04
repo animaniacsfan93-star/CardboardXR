@@ -23,6 +23,10 @@ namespace CardboardXR.Hands
             return IsPinched;
         }
 
+        // Starts a pinch without a distance, for when something other than the 3D gap says the fingers
+        // are together: the gap in the image, on a phone whose palm size no depth sensor taught.
+        public void Begin() => IsPinched = true;
+
         public void Reset() => IsPinched = false;
     }
 }

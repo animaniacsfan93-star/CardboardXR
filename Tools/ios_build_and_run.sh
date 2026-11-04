@@ -31,6 +31,14 @@ if [ "${1:-}" = "--xcode" ]; then XCODE_ONLY=1; shift; fi
 zsh $P/Tools/ios_launch.sh --check "$@" || exit 1
 
 if [ $XCODE_ONLY = 0 ]; then
+    # Say it before anything else: there's no Xcode project until Unity has made one.
+    if [ ! -x "$U" ]; then
+        echo "No Unity editor at $U"
+        echo "  Install Unity 6000.6.0f1 from Unity Hub with its iOS Build Support module,"
+        echo "  or point at another install: UNITY=/path/to/Unity.app/Contents/MacOS/Unity zsh Tools/ios_build_and_run.sh"
+        echo "  With a Builds/iOS exported elsewhere, only Xcode is needed: zsh Tools/ios_build_and_run.sh --xcode"
+        exit 1
+    fi
     if pgrep -f "Unity.app/Contents/MacOS/Unity" >/dev/null; then echo "Unity is running; close it first"; exit 1; fi
     zsh $P/Tools/make_videos.sh || exit 1
     echo "== Unity export"
@@ -39,6 +47,12 @@ if [ $XCODE_ONLY = 0 ]; then
         -executeMethod ProjectBootstrap.StereoBuilder.BuildIos -logFile $LOGS/ios.log
     grep -E "\[Build\]|error CS" $LOGS/ios.log | head -10
     grep -q "Build Succeeded" $LOGS/ios.log || { echo "Unity export failed; see $LOGS/ios.log"; exit 1; }
+fi
+
+if [ ! -d "$XCODE_PROJECT" ]; then
+    echo "No Xcode project at $XCODE_PROJECT"
+    echo "  Unity makes it: run without --xcode on a Mac with Unity 6000.6.0f1 and its iOS module."
+    exit 1
 fi
 
 # The phone, by UDID. Xcode remembers paired devices even when they're unplugged ("unavailable"), so

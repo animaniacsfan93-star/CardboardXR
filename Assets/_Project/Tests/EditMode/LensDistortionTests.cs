@@ -100,6 +100,43 @@ namespace CardboardXR.Stereo.Tests
             Assert.AreEqual(new Vector3(0.03f, 0f, 0f), lens.GetEyeOffset(Eye.Right));
         }
 
+        [Test]
+        public void PerEyeOffsetMovesOnlyThatEyesPlace()
+        {
+            var viewer = ViewerParams.CardboardV1;
+            viewer.perEyeOffset = new[] { 0.002f, 0.001f, -0.003f, 0f };
+            var lens = new LensDistortion(viewer, k_PhoneWidth, k_PhoneHeight);
+
+            var left = lens.GetEyeOffset(Eye.Left);
+            var right = lens.GetEyeOffset(Eye.Right);
+            Assert.AreEqual(-0.028f, left.x, k_Tolerance, "the left eye moved 2 mm right");
+            Assert.AreEqual(0.001f, left.y, k_Tolerance, "and 1 mm up");
+            Assert.AreEqual(0.027f, right.x, k_Tolerance, "the right eye moved 3 mm left");
+            Assert.AreEqual(0f, right.y, k_Tolerance, "and not up");
+        }
+
+        // On a screen narrow enough for the screen's edge, not the viewer, to limit the view.
+        [Test]
+        public void PerEyeOffsetMovesWhatTheEyeSees()
+        {
+            var viewer = ViewerParams.CardboardV1;
+            viewer.perEyeOffset = new[] { 0.002f, 0.001f, 0f, 0f };
+            var without = new LensDistortion(ViewerParams.CardboardV1, k_SmallWidth, k_SmallHeight);
+            var moved = new LensDistortion(viewer, k_SmallWidth, k_SmallHeight);
+
+            var before = without.GetFieldOfView(Eye.Left);
+            var after = moved.GetFieldOfView(Eye.Left);
+            // The lens is nearer the screen's left edge, so more of that side shows, and less of the
+            // middle where the other eye's half begins.
+            Assert.Greater(after.x, before.x, "the outer view widens");
+            Assert.Less(after.y, before.y, "the inner view narrows");
+
+            // The image moves on the screen with the lens: the middle of the eye's texture sits higher.
+            var uvBefore = without.TextureUvToScreenUv(new Vector2(0.5f, 0.5f), Eye.Left);
+            var uvAfter = moved.TextureUvToScreenUv(new Vector2(0.5f, 0.5f), Eye.Left);
+            Assert.AreEqual(0.001f / k_SmallHeight, uvAfter.y - uvBefore.y, k_Tolerance);
+        }
+
         [TestCase(Eye.Left)]
         [TestCase(Eye.Right)]
         public void ProjectionMapsFieldOfViewEdgesToScreenEdges(Eye eye)

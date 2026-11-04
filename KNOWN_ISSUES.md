@@ -39,9 +39,17 @@ A hand's distance, joint positions and pinch gap all scale with the size assumed
   At 30 cm a hand then read 30.5 cm against a ruler. The size learned varies by about ±6% between
   runs with how the hand is held, and LiDAR isn't used directly under 25 cm: at 15 cm it read 7–11%
   off, long in some runs and short in others.
+- **iOS without LiDAR** (the iPhone 11 Pro Max, say, and any iPhone that isn't a Pro): there's no
+  depth sensor, so hand tracking turns environment depth off rather than asking for it every image,
+  and the palm size comes from the hand model's own shapes. It's the median of the last 31 good ones
+  (`PalmSizeLearner`), which keeps a single collapsed or edge-on shape from moving it; that fixes
+  the drift the exponential average used before showed. The hand's 3D pinch gap carries the palm
+  size's error, so on these phones a pinch can also start from the fingers' gap in the image over
+  the palm's width there, which needs no scale (0.4 palm widths, as the 3DoF detector uses), and
+  ends by that same gap. A hand's depth still reads 8–12% short against a ruler, as Android's does.
+  `handDepth 0` tries this path on a phone that does have LiDAR.
 - **Android**: there's no depth sensor, so the palm size comes from the hand model's own
-  estimates. On the iPhone, before LiDAR taught it, the palm size left hands 8–12% nearer than a
-  ruler said.
+  estimates, the same way.
 
 ### Stray hand detections far away
 

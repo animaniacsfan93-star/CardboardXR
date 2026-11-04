@@ -50,11 +50,15 @@ namespace CardboardXR.Stereo
         readonly RenderTexture[] m_EyeTextures = new RenderTexture[2];
         readonly Mesh[] m_Meshes = new Mesh[2];
         readonly Material[] m_Materials = new Material[2];
+        readonly GameObject[] m_DistortionObjects = new GameObject[2];
         Mesh m_MarkerMesh;
         Material m_MarkerMaterial;
         Texture2D m_MarkerTexture;
         GameObject m_Compositor;
         LensDistortion m_Lens;
+        // The physical screen the eyes' views were worked out for, and where its size came from.
+        Vector2 m_ScreenSize;
+        string m_ScreenSource = "";
 
         // Whether the scene is drawn once to the whole screen, instead of once per eye through the
         // viewer's lenses.
@@ -138,33 +142,54 @@ namespace CardboardXR.Stereo
                 Rebuild();
         }
 
+        // A new viewer while the rig is running, for tuning one against the test pattern: the eyes'
+        // places, their projections and the distortion meshes are worked out again, but the eye
+        // textures and cameras stay, so a tap that changes a value costs a frame's work rather than a
+        // rebuild.
+        public void ApplyViewer(ViewerParams viewer)
+        {
+            m_Viewer = viewer;
+            // Before the first build there's no screen size and no compositor to put meshes on: the
+            // viewer kept now is the one that build will use.
+            if (!isActiveAndEnabled || m_Lens == null)
+                return;
+
+            CreateLens(m_ScreenSource);
+            for (var i = 0; i < 2; i++)
+                m_EyeOffsets[i] = m_Lens.GetEyeOffset((Eye)i);
+            if (m_Mono)
+            {
+                // The mono camera sits midway between where the eyes would be.
+                if (m_EyeCameras[0] != null)
+                    m_EyeCameras[0].transform.localPosition = (m_EyeOffsets[0] + m_EyeOffsets[1]) / 2f;
+                return;
+            }
+
+            PlaceEyes();
+            for (var i = 0; i < 2; i++)
+            {
+                if (m_EyeCameras[i] != null)
+                    m_EyeCameras[i].projectionMatrix = m_Lens.GetProjectionMatrix((Eye)i, m_NearClip, m_FarClip);
+            }
+            CreateDistortionMeshes();
+        }
+
         void Rebuild()
         {
             Teardown();
 
             string source;
-            Vector2 screenSize;
             if (m_ScreenSizeOverride.x > 0f && m_ScreenSizeOverride.y > 0f)
             {
-                screenSize = m_ScreenSizeOverride;
+                m_ScreenSize = m_ScreenSizeOverride;
                 source = "override";
             }
             else
             {
-                screenSize = ScreenMetrics.GetScreenSizeMeters(out source);
+                m_ScreenSize = ScreenMetrics.GetScreenSizeMeters(out source);
             }
-
-            m_Lens = new LensDistortion(m_Viewer, screenSize.x, screenSize.y);
-            var fov = m_Lens.GetFieldOfView(Eye.Left) * Mathf.Rad2Deg;
-            Debug.Log($"[Stereo] {m_Viewer.model}: screen {screenSize.x:F4} x {screenSize.y:F4} m ({source}), " +
-                      $"left eye fov L{fov.x:F1} R{fov.y:F1} B{fov.z:F1} T{fov.w:F1}");
-            // In full, for Tools/record_eye.py, which undoes the lens distortion in screen recordings.
-            var invariant = System.Globalization.CultureInfo.InvariantCulture;
-            Debug.Log("[Stereo] Viewer lens: " + string.Format(invariant,
-                "screenToLens {0:F4} interLens {1:F4} trayToLens {2:F4} alignment {3} fov {4} k {5}",
-                m_Viewer.screenToLensDistance, m_Viewer.interLensDistance, m_Viewer.trayToLensDistance, (int)m_Viewer.verticalAlignment,
-                string.Join(",", System.Array.ConvertAll(m_Viewer.leftEyeFieldOfViewAngles, a => a.ToString("F2", invariant))),
-                string.Join(",", System.Array.ConvertAll(m_Viewer.distortionCoefficients, c => c.ToString("F5", invariant)))));
+            m_ScreenSource = source;
+            CreateLens(source);
 
             if (m_Mono)
             {
@@ -178,7 +203,26 @@ namespace CardboardXR.Stereo
             CreateEye(Eye.Left);
             CreateEye(Eye.Right);
             PlaceEyes();
-            CreateCompositor(screenSize);
+            CreateCompositor();
+        }
+
+        // The eyes' views for the viewer in use, and what they came to, for the log.
+        void CreateLens(string source)
+        {
+            m_Lens = new LensDistortion(m_Viewer, m_ScreenSize.x, m_ScreenSize.y);
+            var fov = m_Lens.GetFieldOfView(Eye.Left) * Mathf.Rad2Deg;
+            Debug.Log($"[Stereo] {m_Viewer.model}: screen {m_ScreenSize.x:F4} x {m_ScreenSize.y:F4} m ({source}), " +
+                      $"left eye fov L{fov.x:F1} R{fov.y:F1} B{fov.z:F1} T{fov.w:F1}");
+            // In full, for Tools/record_eye.py, which undoes the lens distortion in screen recordings.
+            var invariant = System.Globalization.CultureInfo.InvariantCulture;
+            var offsets = m_Viewer.perEyeOffset ?? new float[4];
+            Debug.Log("[Stereo] Viewer lens: " + string.Format(invariant,
+                "screenToLens {0:F4} interLens {1:F4} trayToLens {2:F4} alignment {3} fov {4} k {5} offsets {6}",
+                m_Viewer.screenToLensDistance, m_Viewer.interLensDistance, m_Viewer.trayToLensDistance,
+                (int)m_Viewer.verticalAlignment,
+                string.Join(",", System.Array.ConvertAll(m_Viewer.leftEyeFieldOfViewAngles, a => a.ToString("F2", invariant))),
+                string.Join(",", System.Array.ConvertAll(m_Viewer.distortionCoefficients, c => c.ToString("F5", invariant))),
+                string.Join(",", System.Array.ConvertAll(offsets, o => o.ToString("F4", invariant)))));
         }
 
         // The mono view: an ordinary perspective camera drawing straight to the screen, kept in
@@ -242,7 +286,7 @@ namespace CardboardXR.Stereo
             }
         }
 
-        void CreateCompositor(Vector2 screenSize)
+        void CreateCompositor()
         {
             m_Compositor = new GameObject("Distortion Compositor") { layer = CompositorLayer };
             var compositorCamera = m_Compositor.AddComponent<Camera>();
@@ -257,8 +301,24 @@ namespace CardboardXR.Stereo
             compositorCamera.allowMSAA = false;
             compositorCamera.depth = 0;
 
+            CreateDistortionMeshes();
+
+            if (m_AlignmentMarker)
+                CreateAlignmentMarker(m_ScreenSize);
+        }
+
+        // The two eye textures warped onto the screen as the lens in use now wants them, over the
+        // compositor.
+        void CreateDistortionMeshes()
+        {
             for (var i = 0; i < 2; i++)
             {
+                if (m_DistortionObjects[i] != null)
+                    Destroy(m_DistortionObjects[i]);
+                if (m_Meshes[i] != null)
+                    Destroy(m_Meshes[i]);
+                if (m_Materials[i] != null)
+                    Destroy(m_Materials[i]);
                 var eye = (Eye)i;
                 m_Meshes[i] = m_Lens.CreateDistortionMesh(eye);
                 m_Materials[i] = new Material(m_DistortionShader)
@@ -266,11 +326,8 @@ namespace CardboardXR.Stereo
                     name = $"{eye} Distortion",
                     mainTexture = m_EyeTextures[i],
                 };
-                AddCompositorMesh($"{eye} Distortion Mesh", m_Meshes[i], m_Materials[i]);
+                m_DistortionObjects[i] = AddCompositorMesh($"{eye} Distortion Mesh", m_Meshes[i], m_Materials[i]);
             }
-
-            if (m_AlignmentMarker)
-                CreateAlignmentMarker(screenSize);
         }
 
         // A solid line through the same shader, drawn after the eye images so it covers their edges.
@@ -289,7 +346,7 @@ namespace CardboardXR.Stereo
             AddCompositorMesh("Alignment Marker", m_MarkerMesh, m_MarkerMaterial);
         }
 
-        void AddCompositorMesh(string name, Mesh mesh, Material material)
+        GameObject AddCompositorMesh(string name, Mesh mesh, Material material)
         {
             // The shader places vertices on the screen itself, so the transform is irrelevant;
             // huge bounds keep the renderer from being culled.
@@ -302,6 +359,7 @@ namespace CardboardXR.Stereo
             meshRenderer.sharedMaterial = material;
             meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
             meshRenderer.receiveShadows = false;
+            return meshObject;
         }
 
         void Teardown()
@@ -319,10 +377,13 @@ namespace CardboardXR.Stereo
                     Destroy(m_Meshes[i]);
                 if (m_Materials[i] != null)
                     Destroy(m_Materials[i]);
+                if (m_DistortionObjects[i] != null)
+                    Destroy(m_DistortionObjects[i]);
                 m_EyeCameras[i] = null;
                 m_EyeTextures[i] = null;
                 m_Meshes[i] = null;
                 m_Materials[i] = null;
+                m_DistortionObjects[i] = null;
             }
 
             if (m_MarkerMesh != null)
