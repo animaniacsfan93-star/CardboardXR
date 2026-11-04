@@ -22,7 +22,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 90
     env:
-      CARDBOARDXR_BUILD_PATH: build/iOS
+      CARDBOARDXR_BUILD_PATH: Builds/iOS
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,23 +49,14 @@ jobs:
           versioning: None
           allowDirtyBuild: true
 
+      # The repository's own script does the Xcode half. --ipa needs no phone attached and no signing,
+      # and writes Builds/CardboardXR-unsigned.ipa, the same file a Mac without the phone would get.
       - name: Xcode builds an unsigned app
-        run: |
-          set -euo pipefail
-          cd "$CARDBOARDXR_BUILD_PATH"
-          xcodebuild -project Unity-iPhone.xcodeproj -scheme Unity-iPhone \
-            -configuration Release -sdk iphoneos -derivedDataPath xcode-out \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build
-          APP=$(ls -d xcode-out/Build/Products/Release-iphoneos/*.app | head -1)
-          echo "Built $APP"
-          mkdir -p Payload
-          cp -R "$APP" Payload/
-          zip -qry CardboardXR-unsigned.ipa Payload
+        run: zsh Tools/ios_build_and_run.sh --xcode --ipa
 
       - uses: actions/upload-artifact@v4
         with:
           name: CardboardXR-unsigned-ipa
-          path: build/iOS/CardboardXR-unsigned.ipa
+          path: Builds/CardboardXR-unsigned.ipa
           if-no-files-found: error
           retention-days: 14

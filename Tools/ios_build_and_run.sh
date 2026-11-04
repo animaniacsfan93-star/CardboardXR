@@ -2,57 +2,84 @@
 # Builds the iPhone version, signs it, installs it and launches it, then prints the session log.
 #   zsh Tools/ios_build_and_run.sh            # Unity export, then Xcode, then the phone
 #   zsh Tools/ios_build_and_run.sh --xcode    # skip Unity and rebuild from the existing export
+#   zsh Tools/ios_build_and_run.sh --ipa      # an unsigned .ipa, for signing elsewhere: no phone needed
 #   zsh Tools/ios_build_and_run.sh --ei dof 6 --ei passthrough 1   # with launch options
 # Launch options come last, as on Android, and go to Tools/ios_launch.sh, which does the launching.
 # The Unity step takes a few minutes and switches the active build target to iOS, so the next
 # Android build re-imports assets. --xcode skips it when only native or signing changes matter.
 #
-# Needs, once, on this Mac: Xcode signed into an Apple ID (Xcode > Settings > Accounts; a free
-# personal team is enough), the iPhone connected and trusted, and Developer Mode on the phone
-# (Settings > Privacy & Security), which only appears after the first install attempt. Until
-# Developer Mode is on, devicectl lists the phone as "connected (no DDI)": it can see it but can't
-# run anything on it. The first time, doing that setup through Xcode's own UI is the sure path.
+# --ipa needs no iPhone, so a Mac that only has to build can use it: it writes
+# Builds/CardboardXR-unsigned.ipa, which you sign for your own phone from any computer
+# (docs/ios-without-a-mac.md). Without it, this Mac needs, once: Xcode signed into an Apple ID
+# (Xcode > Settings > Accounts; a free personal team is enough), the iPhone connected and trusted,
+# and Developer Mode on the phone (Settings > Privacy & Security), which only appears after the
+# first install attempt. Until Developer Mode is on, devicectl lists the phone as "connected (no
+# DDI)": it can see it but can't run anything on it. The first time, doing that setup through
+# Xcode's own UI is the sure path.
 set -u
 P=${0:A:h:h}
-# Another Unity 6000.6 install: UNITY=/path/to/Unity.app/Contents/MacOS/Unity zsh Tools/...
-U=${UNITY:-/Applications/Unity/Hub/Editor/6000.6.0f1/Unity.app/Contents/MacOS/Unity}
 # Another app id (an iOS bundle id belongs to the Apple team that first signed it):
 #   CARDBOARDXR_BUNDLE_ID=com.example.cardboardxr zsh Tools/...
 BUNDLE=${CARDBOARDXR_BUNDLE_ID:-com.brenpoly.cardboardxr}
 XCODE_PROJECT=$P/Builds/iOS/Unity-iPhone.xcodeproj
 DERIVED=$P/Builds/ios-derived
+IPA=$P/Builds/CardboardXR-unsigned.ipa
 LOGS=${TMPDIR:-/tmp}/cardboardxr
 mkdir -p $LOGS
 cd $P || exit 1
 
 XCODE_ONLY=0
-if [ "${1:-}" = "--xcode" ]; then XCODE_ONLY=1; shift; fi
+MAKE_IPA=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --xcode) XCODE_ONLY=1 ;;
+        --ipa) MAKE_IPA=1 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+# What's left is launch options for ios_launch.sh.
+set -- "${ARGS[@]}"
 # Reject a mistyped option now rather than after a five-minute build.
-zsh $P/Tools/ios_launch.sh --check "$@" || exit 1
+if [ $MAKE_IPA = 0 ]; then
+    zsh $P/Tools/ios_launch.sh --check "$@" || exit 1
+fi
 
 if [ $XCODE_ONLY = 0 ]; then
-    # Say it before anything else: there's no Xcode project until Unity has made one.
-    if [ ! -x "$U" ]; then
-        echo "No Unity editor at $U"
-        echo "  Install Unity 6000.6.0f1 from Unity Hub with its iOS Build Support module,"
-        echo "  or point at another install: UNITY=/path/to/Unity.app/Contents/MacOS/Unity zsh Tools/ios_build_and_run.sh"
-        echo "  With a Builds/iOS exported elsewhere, only Xcode is needed: zsh Tools/ios_build_and_run.sh --xcode"
-        exit 1
-    fi
-    if pgrep -f "Unity.app/Contents/MacOS/Unity" >/dev/null; then echo "Unity is running; close it first"; exit 1; fi
-    zsh $P/Tools/make_videos.sh || exit 1
-    echo "== Unity export"
-    rm -f $LOGS/ios.log
-    $U -batchmode -quit -projectPath $P -buildTarget iOS \
-        -executeMethod ProjectBootstrap.StereoBuilder.BuildIos -logFile $LOGS/ios.log
-    grep -E "\[Build\]|error CS" $LOGS/ios.log | head -10
-    grep -q "Build Succeeded" $LOGS/ios.log || { echo "Unity export failed; see $LOGS/ios.log"; exit 1; }
+    zsh $P/Tools/ios_export.sh || exit 1
 fi
 
 if [ ! -d "$XCODE_PROJECT" ]; then
     echo "No Xcode project at $XCODE_PROJECT"
-    echo "  Unity makes it: run without --xcode on a Mac with Unity 6000.6.0f1 and its iOS module."
+    echo "  Unity makes it: zsh Tools/ios_export.sh, on a Mac with Unity 6000.6.0f1 and its iOS module."
     exit 1
+fi
+
+# An .ipa to sign somewhere else: no phone, no certificate, no Apple ID on this Mac.
+if [ $MAKE_IPA = 1 ]; then
+    echo "== Xcode build (unsigned)"
+    IPA_DERIVED=$P/Builds/ipa-derived
+    rm -rf $IPA_DERIVED
+    xcodebuild -project $XCODE_PROJECT -scheme Unity-iPhone -configuration Release \
+        -sdk iphoneos -derivedDataPath $IPA_DERIVED \
+        CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+        build > $LOGS/xcode-ipa.log 2>&1
+    if [ $? -ne 0 ]; then
+        tail -20 $LOGS/xcode-ipa.log
+        grep -m 5 -E "error|No space left" $LOGS/xcode-ipa.log
+        echo "Xcode build failed; the full output is in $LOGS/xcode-ipa.log"
+        exit 1
+    fi
+    APP=$(ls -d $IPA_DERIVED/Build/Products/Release-iphoneos/*.app 2>/dev/null | head -1)
+    [ -n "$APP" ] || { echo "No .app built; see $LOGS/xcode-ipa.log"; exit 1; }
+    rm -rf $P/Builds/ipa "$IPA"
+    mkdir -p $P/Builds/ipa/Payload
+    cp -R "$APP" $P/Builds/ipa/Payload/
+    (cd $P/Builds/ipa && zip -qry "$IPA" Payload)
+    echo "Wrote $IPA"
+    echo "  It is unsigned: sign it for your iPhone (docs/ios-without-a-mac.md), or run this"
+    echo "  without --ipa on a Mac with the phone attached."
+    exit 0
 fi
 
 # The phone, by UDID. Xcode remembers paired devices even when they're unplugged ("unavailable"), so
@@ -61,6 +88,7 @@ fi
 UDID=$(xcrun devicectl list devices 2>/dev/null | grep -E '[[:space:]](connected|available \(paired\))[[:space:]]' | grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}' | head -1)
 if [ -z "$UDID" ]; then
     echo "No connected iPhone. Plug it in, unlock it, and trust this Mac."
+    echo "  Just need the app built? zsh Tools/ios_build_and_run.sh --ipa needs no phone."
     exit 1
 fi
 echo "== iPhone $UDID"

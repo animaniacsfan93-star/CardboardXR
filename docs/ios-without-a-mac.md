@@ -39,10 +39,16 @@ The licence belongs to that Unity account: keep the secret private.
 
 Actions > **iOS build** > *Run workflow* (or just push to `main`). It takes a while the first time —
 it installs the Unity editor, so give it 30–60 minutes — and less afterwards, thanks to the cached
-`Library` folder. When it's done, the run has an artifact called **CardboardXR-unsigned-ipa**
-holding `CardboardXR-unsigned.ipa`.
+`Library` folder. Under the hood it runs the repository's own tools: Unity exports the project (the
+work of `Tools/ios_export.sh`), then `Tools/ios_build_and_run.sh --xcode --ipa` makes the unsigned
+`.ipa`, with no phone attached. When it's done, the run has an artifact called
+**CardboardXR-unsigned-ipa** holding `CardboardXR-unsigned.ipa`.
 
 That file is built but not signed: iOS won't run it until it's signed for your phone.
+
+The same `--ipa` mode works on any Mac without the phone: `zsh Tools/ios_build_and_run.sh --ipa`
+does the export and the unsigned build in one go, which is the alternative if you can borrow a Mac
+for an hour.
 
 ## 4. Sign and install from your Linux PC
 

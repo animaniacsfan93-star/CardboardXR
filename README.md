@@ -60,8 +60,13 @@ session log.
 zsh Tools/build_and_run.sh                                   # Android
 zsh Tools/ios_build_and_run.sh                               # iOS
 zsh Tools/ios_build_and_run.sh --xcode                       # iOS, reusing the last Unity export
+zsh Tools/ios_build_and_run.sh --ipa                         # iOS, an unsigned .ipa, no phone needed
+zsh Tools/ios_export.sh                                      # iOS, just the Unity export
 zsh Tools/ios_launch.sh                                      # iOS, relaunch without rebuilding
 ```
+
+`--ipa` needs no iPhone: it leaves `Builds/CardboardXR-unsigned.ipa` to sign elsewhere (see below).
+`ios_export.sh` is the Unity half alone, for a Mac that only builds.
 
 Builds are release builds. For a development build (debuggable, with the Unity Profiler able to
 connect over the local network), set `CARDBOARDXR_DEVELOPMENT=1`. The app id is
